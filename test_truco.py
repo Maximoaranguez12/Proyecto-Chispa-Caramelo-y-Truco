@@ -90,6 +90,14 @@ class TrucoRulesTests(unittest.TestCase):
         self.assertTrue(game.hand_over)
         self.assertEqual(game.scores, [1, 0])
 
+    def test_accepted_truco_keeps_the_caller_turn(self) -> None:
+        game = self.game()
+        game.call_truco(0, "truco")
+        game.respond_truco(1, True)
+        self.assertEqual(game.turn, 0)
+        self.assertEqual(game.truco_level, 2)
+        self.assertFalse(game.hand_over)
+
     def envido_game(self) -> TrucoGame:
         game = self.game()
         game.hands = [

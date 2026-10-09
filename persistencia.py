@@ -22,7 +22,10 @@ except ImportError as exc:
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{3,24}$")
 PASSWORD_LENGTH = (8, 128)
+# El esquema se aplica al iniciar el servidor; las sentencias ALTER permiten
+# completar instalaciones anteriores sin reemplazar las tablas existentes.
 SCHEMA = """
+-- Cuentas y estadísticas acumuladas de cada jugador.
 CREATE TABLE IF NOT EXISTS usuarios (
     id BIGSERIAL PRIMARY KEY,
     username VARCHAR(24) UNIQUE NOT NULL,
@@ -35,6 +38,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
 ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS password_salt TEXT;
 ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS wins INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS losses INTEGER NOT NULL DEFAULT 0;
+-- El asiento del bot no tiene usuario asociado en player_two_id.
 CREATE TABLE IF NOT EXISTS partidas (
     id UUID PRIMARY KEY,
     player_one_id BIGINT NOT NULL REFERENCES usuarios(id),
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS partidas (
     contra_bot BOOLEAN NOT NULL DEFAULT FALSE,
     fecha TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- Mensajes ligados a la partida para mantener el historial de chat.
 CREATE TABLE IF NOT EXISTS mensajes (
     id BIGSERIAL PRIMARY KEY,
     partida_id UUID REFERENCES partidas(id) ON DELETE CASCADE,
@@ -63,7 +68,10 @@ CREATE INDEX IF NOT EXISTS idx_mensajes_partida_fecha ON mensajes(partida_id, fe
 
 
 class Persistence:
+    """Capa de acceso a PostgreSQL para cuentas, partidas y mensajes."""
+
     def __init__(self) -> None:
+        """Lee la configuración de conexión sin almacenar credenciales en código."""
         self.database_url = os.environ.get("DATABASE_URL")
         self.connection_options = {
             "host": os.environ.get("PGHOST", "localhost"),
@@ -76,6 +84,7 @@ class Persistence:
 
     @contextmanager
     def _connection(self) -> Generator[Any, None, None]:
+        """Abre una transacción: confirma al salir o revierte si hubo una excepción."""
         if self.database_url:
             connection = psycopg2.connect(self.database_url)
         else:
@@ -90,6 +99,7 @@ class Persistence:
             connection.close()
 
     def initialize(self) -> None:
+        """Crea tablas, columnas e índices requeridos por la versión actual."""
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 for statement in SCHEMA.split(";"):
@@ -98,6 +108,7 @@ class Persistence:
 
     @staticmethod
     def _hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
+        """Calcula hash scrypt y devuelve el salt y el hash en formato hexadecimal."""
         actual_salt = salt or secrets.token_bytes(16)
         password_hash = hashlib.scrypt(
             password.encode("utf-8"), salt=actual_salt, n=2**14, r=8, p=1
@@ -105,6 +116,7 @@ class Persistence:
         return actual_salt.hex(), password_hash.hex()
 
     def authenticate(self, action: str, username: str, password: str) -> dict[str, Any]:
+        """Registra o autentica una cuenta y devuelve su perfil público."""
         if not isinstance(username, str) or not USERNAME_PATTERN.fullmatch(username):
             raise ValueError("El usuario debe tener 3-24 caracteres: letras, números o _.")
         if not isinstance(password, str):
@@ -123,6 +135,7 @@ class Persistence:
                 if action == "register":
                     if row:
                         raise ValueError("Ese nombre de usuario ya está registrado.")
+                    # Cada cuenta recibe un salt aleatorio; nunca se guarda la clave original.
                     salt, password_hash = self._hash_password(password)
                     cursor.execute(
                         "INSERT INTO usuarios (username, password_salt, password_hash) "
@@ -141,6 +154,7 @@ class Persistence:
                     _, password_hash = self._hash_password(
                         password, bytes.fromhex(row["password_salt"])
                     )
+                    # La comparación de tiempo constante reduce filtraciones por temporización.
                     if not hmac.compare_digest(password_hash, row["password_hash"]):
                         raise ValueError("Usuario o contraseña incorrectos.")
                 else:
@@ -149,6 +163,7 @@ class Persistence:
                         "wins": row["wins"], "losses": row["losses"]}
 
     def save_chat(self, match_id: str, user_id: int, message: str) -> None:
+        """Persiste un mensaje asociado al usuario y a la partida."""
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -159,6 +174,7 @@ class Persistence:
 
     def create_match(self, match_id: str, players: list[dict[str, Any]],
                      against_bot: bool) -> None:
+        """Registra el inicio de una partida; al bot no se le asigna ID de usuario."""
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -175,6 +191,7 @@ class Persistence:
 
     def save_match(self, match_id: str, players: list[dict[str, Any]],
                    winner: int, scores: list[int], against_bot: bool) -> None:
+        """Cierra el historial y actualiza estadísticas sin contar al bot como cuenta."""
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -183,6 +200,7 @@ class Persistence:
                     (winner, scores[0], scores[1], match_id),
                 )
                 if cursor.rowcount == 0:
+                    # El filtro evita actualizar estadísticas si la partida ya se guardó.
                     return
                 cursor.execute(
                     "UPDATE usuarios SET wins = wins + 1 WHERE id = %s"

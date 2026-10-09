@@ -25,6 +25,8 @@ logging.basicConfig(level=logging.INFO,
 
 @dataclass(eq=False)
 class Client:
+    """Conexión de un cliente y su identidad/partida actual en el servidor."""
+
     sock: socket.socket
     address: tuple[str, int]
     send_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -32,6 +34,7 @@ class Client:
     match_id: str | None = None
 
     def send(self, message: dict[str, Any]) -> None:
+        """Envía una respuesta JSON completa, serializando escrituras concurrentes."""
         payload = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
         with self.send_lock:
             self.sock.sendall(payload)
@@ -39,6 +42,8 @@ class Client:
 
 @dataclass
 class Match:
+    """Estado compartido de una partida y bloqueo para sus acciones."""
+
     id: str
     players: list[Client]
     game: TrucoGame
@@ -48,7 +53,10 @@ class Match:
 
 
 class GameServer:
+    """Coordina conexiones, emparejamientos, reglas, bot y persistencia."""
+
     def __init__(self, database: Persistence) -> None:
+        """Prepara colecciones compartidas y mecanismos de sincronización."""
         self.database = database
         self.clients: set[Client] = set()
         self.waiting: list[Client] = []
@@ -57,10 +65,12 @@ class GameServer:
         self.running = True
 
     def _error(self, client: Client, message: str) -> None:
+        """Envía al cliente un error legible por el protocolo JSON."""
         client.send({"type": "error", "message": message})
 
     @staticmethod
     def _match_users(match: Match) -> list[dict[str, Any]]:
+        """Obtiene los perfiles de ambos asientos, incluido el perfil del bot."""
         users: list[dict[str, Any]] = []
         for player in match.players:
             if player.user is None:
@@ -69,6 +79,7 @@ class GameServer:
         return users
 
     def _send_state(self, match: Match, event_type: str = "game_state") -> None:
+        """Envía a cada usuario su propia vista, sin enviarle estado al bot."""
         for seat, client in enumerate(match.players):
             if client.user is None or client.user.get("id") is None:
                 continue
@@ -80,6 +91,7 @@ class GameServer:
 
     def _create_match(self, players: list[Client],
                       against_bot: bool = False) -> Match:
+        """Crea una partida, registra su historial y notifica el estado inicial."""
         match_id = str(uuid.uuid4())
         if against_bot:
             bot = Client(sock=players[0].sock, address=players[0].address)
@@ -100,11 +112,13 @@ class GameServer:
         return match
 
     def _get_match(self, client: Client) -> Match:
+        """Busca la partida activa del cliente o rechaza la acción."""
         if not client.match_id or client.match_id not in self.matches:
             raise ValueError("No estás en una partida.")
         return self.matches[client.match_id]
 
     def _persist_result(self, match: Match) -> None:
+        """Guarda una partida terminada una sola vez y avisa si falla."""
         if not match.game.match_over or match.saved:
             return
         match.saved = True
@@ -123,9 +137,11 @@ class GameServer:
 
     @staticmethod
     def _bot_card_rank(cards: list[Card]) -> int:
+        """Devuelve la fuerza de la mejor carta disponible para el bot."""
         return max((card_rank(card) for card in cards), default=0)
 
     def _run_bot(self, match: Match) -> None:
+        """Resuelve las respuestas automáticas y juega si el turno es del bot."""
         if not match.against_bot or match.game.hand_over:
             return
         game = match.game
@@ -155,10 +171,13 @@ class GameServer:
                 game.play_card(bot_seat, choose_bot_card(cards))
 
     def _new_hand(self, match: Match) -> None:
+        """Reparte la siguiente mano y permite que el bot abra si es mano."""
         match.game.next_hand()
+        self._run_bot(match)
         self._send_state(match)
 
     def _handle_match_action(self, client: Client, message: dict[str, Any]) -> None:
+        """Valida y aplica una acción de juego, luego actualiza bot y clientes."""
         with self.lock:
             match = self._get_match(client)
         with match.lock:
@@ -200,6 +219,7 @@ class GameServer:
                 self._error(client, str(exc))
 
     def _handle_chat(self, client: Client, message: dict[str, Any]) -> None:
+        """Guarda y distribuye el chat, o procesa comandos de Envido."""
         text = message.get("message")
         if not isinstance(text, str) or not text.strip() or len(text) > 500:
             raise ValueError("El mensaje debe tener entre 1 y 500 caracteres.")
@@ -236,6 +256,7 @@ class GameServer:
 
     def _handle_authenticated(self, client: Client,
                               message: dict[str, Any]) -> None:
+        """Exige autenticación y deriva cada acción a su flujo correspondiente."""
         action = message.get("action")
         if action in ("register", "login"):
             if client.user:
@@ -275,6 +296,7 @@ class GameServer:
             self._handle_match_action(client, message)
 
     def handle_client(self, client: Client) -> None:
+        """Lee líneas JSON de una conexión hasta que el cliente se desconecta."""
         try:
             stream = client.sock.makefile("r", encoding="utf-8", newline="\n")
             for line in stream:
@@ -301,6 +323,7 @@ class GameServer:
             self._disconnect(client)
 
     def _disconnect(self, client: Client) -> None:
+        """Limpia la conexión y finaliza la partida si el usuario se desconecta."""
         with self.lock:
             if client in self.waiting:
                 self.waiting.remove(client)
@@ -328,6 +351,7 @@ class GameServer:
             client.sock.close()
 
     def serve_forever(self) -> None:
+        """Inicializa PostgreSQL, escucha TCP y crea un hilo por conexión."""
         self.database.initialize()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -344,6 +368,7 @@ class GameServer:
 
 
 def main() -> None:
+    """Punto de entrada: inicia el servidor y reporta fallos de PostgreSQL."""
     database = Persistence()
     try:
         GameServer(database).serve_forever()

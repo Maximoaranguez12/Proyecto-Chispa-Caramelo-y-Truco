@@ -21,7 +21,10 @@ WHITE = (255, 255, 255)
 
 
 class NetworkClient:
+    """Mantiene la conexión TCP y transfiere mensajes JSON en segundo plano."""
+
     def __init__(self, host: str, port: int) -> None:
+        """Conecta al servidor y arranca el hilo que recibe sus mensajes."""
         self.sock = socket.create_connection((host, port), timeout=5)
         self.sock.settimeout(None)
         self.incoming: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -29,11 +32,13 @@ class NetworkClient:
         threading.Thread(target=self._receive, daemon=True).start()
 
     def send(self, payload: dict[str, Any]) -> None:
+        """Serializa un mensaje JSON y lo envía como una línea completa."""
         data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         with self.send_lock:
             self.sock.sendall(data)
 
     def _receive(self) -> None:
+        """Lee respuestas sin bloquear el bucle gráfico y las pone en la cola."""
         try:
             stream = self.sock.makefile("r", encoding="utf-8", newline="\n")
             for line in stream:
@@ -42,6 +47,7 @@ class NetworkClient:
             self.incoming.put({"type": "error", "message": f"Conexión cerrada: {exc}"})
 
     def close(self) -> None:
+        """Cierra ordenadamente el socket al salir del cliente."""
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -50,7 +56,10 @@ class NetworkClient:
 
 
 class TrucoClient:
+    """Administra las pantallas, los controles y el estado visual del juego."""
+
     def __init__(self, host: str, port: int) -> None:
+        """Inicializa Pygame y prepara el estado local de la interfaz."""
         pygame.init()
         pygame.display.set_caption("Chispa, Caramelo y Truco")
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -76,11 +85,13 @@ class TrucoClient:
 
     def _text(self, text: str, x: int, y: int, color: tuple[int, int, int] = WHITE,
               font: pygame.font.Font | None = None) -> None:
+        """Dibuja texto en la ventana usando la fuente indicada o la normal."""
         rendered = (font or self.font).render(text, True, color)
         self.screen.blit(rendered, (x, y))
 
     def _button(self, label: str, rect: pygame.Rect,
                 color: tuple[int, int, int] = GOLD) -> bool:
+        """Dibuja un botón y devuelve si el cursor está encima."""
         pygame.draw.rect(self.screen, color, rect, border_radius=9)
         pygame.draw.rect(self.screen, CREAM, rect, width=2, border_radius=9)
         rendered = self.font.render(label, True, (35, 35, 30))
@@ -88,6 +99,7 @@ class TrucoClient:
         return rect.collidepoint(pygame.mouse.get_pos())
 
     def _connect(self) -> bool:
+        """Abre la conexión una sola vez; informa el error en la interfaz."""
         if self.network:
             return True
         try:
@@ -98,6 +110,7 @@ class TrucoClient:
             return False
 
     def _send(self, payload: dict[str, Any]) -> None:
+        """Envía una acción al servidor y convierte errores en avisos visibles."""
         try:
             if self.network is None:
                 raise OSError("No hay conexión con el servidor.")
@@ -106,6 +119,7 @@ class TrucoClient:
             self.notice = str(exc)
 
     def _handle_messages(self) -> None:
+        """Consume las respuestas de red y actualiza usuario, partida o avisos."""
         if not self.network:
             return
         while True:
@@ -131,6 +145,7 @@ class TrucoClient:
                 self.notice = message.get("message", "Error del servidor.")
 
     def _draw_auth(self) -> None:
+        """Dibuja la pantalla para ingresar o crear una cuenta."""
         self._text("Chispa, Caramelo y Truco", 325, 100, GOLD, self.title_font)
         self._text("Truco Argentino  ·  partidas 1 vs 1", 387, 155, CREAM)
         self._text("Nombre de usuario", 345, 250, CREAM)
@@ -152,6 +167,7 @@ class TrucoClient:
             self._text(self.notice[:85], 250, 620, GOLD, self.small_font)
 
     def _draw_lobby(self) -> None:
+        """Dibuja el perfil del usuario y las opciones para buscar partida."""
         self._text("¡A la mesa!", 395, 140, GOLD, self.title_font)
         if self.user:
             self._text(f"Jugador: {self.user['username']}", 430, 210, CREAM)
@@ -165,6 +181,7 @@ class TrucoClient:
             self._text(self.notice[:85], 275, 600, GOLD, self.small_font)
 
     def _draw_card(self, card: dict[str, Any], rect: pygame.Rect) -> None:
+        """Dibuja una carta con su valor numérico y el nombre de su palo."""
         pygame.draw.rect(self.screen, CREAM, rect, border_radius=10)
         pygame.draw.rect(self.screen, GOLD, rect, width=3, border_radius=10)
         suit = card["suit"]
@@ -174,6 +191,7 @@ class TrucoClient:
                    color, self.small_font)
 
     def _draw_game(self) -> None:
+        """Dibuja el tablero, cartas, mensajes y controles válidos del turno."""
         state = self.state
         if not state:
             return
@@ -272,6 +290,7 @@ class TrucoClient:
         self._text(self.chat_input[-34:], 825, 695, CREAM, self.small_font)
 
     def _auth_submit(self) -> None:
+        """Valida que haya conexión y envía la operación de acceso elegida."""
         if not self._connect():
             return
         self._send({"action": self.auth_action, "username": self.username,
@@ -280,6 +299,7 @@ class TrucoClient:
         self.notice = "Conectando…"
 
     def _click(self, position: tuple[int, int]) -> None:
+        """Traduce un clic en la pantalla activa a una acción para el servidor."""
         if self.scene == "auth":
             if pygame.Rect(345, 282, 410, 46).collidepoint(position):
                 self.active_field = "username"
@@ -351,6 +371,7 @@ class TrucoClient:
                         break
 
     def _key(self, event: pygame.event.Event) -> None:
+        """Procesa teclas para los campos de acceso y el chat de la partida."""
         if self.scene == "auth":
             if event.key == pygame.K_TAB:
                 self.active_field = ("password" if self.active_field == "username"
@@ -378,6 +399,7 @@ class TrucoClient:
                 self.chat_input += event.unicode
 
     def run(self) -> None:
+        """Ejecuta el bucle gráfico hasta que se cierre la ventana."""
         while self.running:
             self._handle_messages()
             for event in pygame.event.get():
@@ -402,6 +424,7 @@ class TrucoClient:
 
 
 def main() -> None:
+    """Lee los parámetros de conexión y arranca la interfaz del cliente."""
     parser = argparse.ArgumentParser(description="Cliente de Chispa, Caramelo y Truco")
     parser.add_argument("--host", default="127.0.0.1",
                         help="Dirección del servidor (por defecto: 127.0.0.1)")
